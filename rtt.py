@@ -47,6 +47,21 @@ def parse_probe(payload: str) -> tuple[int, int]:
     return int(sequence_text), int(send_time_text)
 
 
+def recv_line(sock: socket.socket, timeout: float) -> bytes:
+    buffer = bytearray()
+    sock.settimeout(timeout)
+
+    while True:
+        chunk = sock.recv(BUFFER_SIZE)
+        if not chunk:
+            return bytes(buffer)
+
+        buffer.extend(chunk)
+        newline_index = buffer.find(b"\n")
+        if newline_index != -1:
+            return bytes(buffer[: newline_index + 1])
+
+
 def run_server(protocol: str, ip: str, port: int, duration: float) -> None:
     deadline = time.monotonic() + duration
 
@@ -70,21 +85,30 @@ def run_server(protocol: str, ip: str, port: int, duration: float) -> None:
 
             with connection:
                 connection.settimeout(1.0)
-                with connection.makefile("rwb") as stream:
-                    while time.monotonic() < deadline:
-                        try:
-                            line = stream.readline()
-                        except socket.timeout:
-                            continue
+                pending = bytearray()
 
-                        if not line:
+                while time.monotonic() < deadline:
+                    try:
+                        data = connection.recv(BUFFER_SIZE)
+                    except socket.timeout:
+                        continue
+
+                    if not data:
+                        break
+
+                    pending.extend(data)
+                    while True:
+                        newline_index = pending.find(b"\n")
+                        if newline_index == -1:
                             break
+
+                        line = bytes(pending[: newline_index + 1])
+                        del pending[: newline_index + 1]
 
                         payload = line.decode("utf-8", errors="replace")
                         sequence, send_time_ns = parse_probe(payload)
                         print(f"Received from {client_address[0]} seq={sequence} send_time_ns={send_time_ns}")
-                        stream.write(line)
-                        stream.flush()
+                        connection.sendall(line)
     else:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_socket:
             server_socket.bind((ip, port))
@@ -141,31 +165,29 @@ def run_client(protocol: str, ip: str, port: int, duration: float, interval: flo
             client_socket.connect((ip, port))
             client_socket.settimeout(timeout)
 
-            with client_socket.makefile("rwb") as stream:
-                while time.monotonic() < deadline:
-                    send_time_ns = time.time_ns()
-                    probe = build_probe(sequence, send_time_ns).encode("utf-8")
-                    stream.write(probe)
-                    stream.flush()
-                    packets_sent += 1
+            while time.monotonic() < deadline:
+                send_time_ns = time.time_ns()
+                probe = build_probe(sequence, send_time_ns).encode("utf-8")
+                client_socket.sendall(probe)
+                packets_sent += 1
 
-                    try:
-                        response = stream.readline()
-                    except socket.timeout:
-                        append_csv_row(csv_path, [sequence, send_time_ns, "", "", "timeout", protocol, ip, port, packets_sent, packets_received, ""])
-                        print(f"seq={sequence} timeout")
-                    else:
-                        if not response:
-                            append_csv_row(csv_path, [sequence, send_time_ns, "", "", "disconnected", protocol, ip, port, packets_sent, packets_received, ""])
-                            print(f"seq={sequence} disconnected")
-                            break
+                try:
+                    response = recv_line(client_socket, timeout)
+                except socket.timeout:
+                    append_csv_row(csv_path, [sequence, send_time_ns, "", "", "timeout", protocol, ip, port, packets_sent, packets_received, ""])
+                    print(f"seq={sequence} timeout")
+                else:
+                    if not response:
+                        append_csv_row(csv_path, [sequence, send_time_ns, "", "", "disconnected", protocol, ip, port, packets_sent, packets_received, ""])
+                        print(f"seq={sequence} disconnected")
+                        break
 
-                        packets_received += 1
-                        receive_time_ns = time.time_ns()
-                        rtt_ms = (receive_time_ns - send_time_ns) / 1_000_000
-                        response_text = response.decode("utf-8", errors="replace").strip()
-                        append_csv_row(csv_path, [sequence, send_time_ns, receive_time_ns, f"{rtt_ms:.3f}", "ok", protocol, ip, port, packets_sent, packets_received, ""])
-                        print(f"seq={sequence} from {client_socket.getpeername()[0]} rtt={rtt_ms:.3f} ms reply={response_text}")
+                    packets_received += 1
+                    receive_time_ns = time.time_ns()
+                    rtt_ms = (receive_time_ns - send_time_ns) / 1_000_000
+                    response_text = response.decode("utf-8", errors="replace").strip()
+                    append_csv_row(csv_path, [sequence, send_time_ns, receive_time_ns, f"{rtt_ms:.3f}", "ok", protocol, ip, port, packets_sent, packets_received, ""])
+                    print(f"seq={sequence} from {client_socket.getpeername()[0]} rtt={rtt_ms:.3f} ms reply={response_text}")
 
                     sequence += 1
                     remaining = deadline - time.monotonic()
