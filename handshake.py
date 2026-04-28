@@ -13,6 +13,7 @@ import socket
 
 DEFAULT_PORT = 9999
 DEFAULT_MESSAGE = "hello"
+DEFAULT_RESPONSE = "hello received"
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +39,7 @@ def run_server(protocol: str, ip: str, port: int) -> None:
                 data = client_socket.recv(4096)
                 message = data.decode("utf-8", errors="replace")
                 print(f"Received from {client_address[0]}: {message}")
+                client_socket.sendall(DEFAULT_RESPONSE.encode("utf-8"))
     else:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server_socket:
             server_socket.bind((ip, port))
@@ -46,6 +48,7 @@ def run_server(protocol: str, ip: str, port: int) -> None:
             data, client_address = server_socket.recvfrom(4096)
             message = data.decode("utf-8", errors="replace")
             print(f"Received from {client_address[0]}: {message}")
+            server_socket.sendto(DEFAULT_RESPONSE.encode("utf-8"), client_address)
 
 
 def run_client(protocol: str, ip: str, port: int, message: str) -> None:
@@ -55,9 +58,14 @@ def run_client(protocol: str, ip: str, port: int, message: str) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
             client_socket.connect((ip, port))
             client_socket.sendall(payload)
+            response = client_socket.recv(4096).decode("utf-8", errors="replace")
+            server_ip = client_socket.getpeername()[0]
+            print(f"Received from {server_ip}: {response}")
     else:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client_socket:
             client_socket.sendto(payload, (ip, port))
+            response, server_address = client_socket.recvfrom(4096)
+            print(f"Received from {server_address[0]}: {response.decode('utf-8', errors='replace')}")
 
 
 def main() -> None:
